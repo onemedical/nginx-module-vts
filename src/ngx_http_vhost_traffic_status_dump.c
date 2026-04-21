@@ -187,6 +187,7 @@ ngx_http_vhost_traffic_status_dump_execute(ngx_event_t *ev)
     ssize_t                               n;
     ngx_fd_t                              fd;
     ngx_file_t                            file;
+    ngx_slab_pool_t                      *shpool;
     ngx_http_vhost_traffic_status_ctx_t  *ctx;
 
     ctx = ev->data;
@@ -218,7 +219,13 @@ ngx_http_vhost_traffic_status_dump_execute(ngx_event_t *ev)
         return NGX_ERROR;
     }
 
+    shpool = (ngx_slab_pool_t *) ctx->shm_zone->shm.addr;
+
+    ngx_shmtx_lock(&shpool->mutex);
+
     ngx_http_vhost_traffic_status_dump_node_write(ev, &file, ctx->rbtree->root);
+
+    ngx_shmtx_unlock(&shpool->mutex);
 
     ngx_http_vhost_traffic_status_file_unlock(&file);
     ngx_http_vhost_traffic_status_file_close(&file);
@@ -299,6 +306,10 @@ ngx_http_vhost_traffic_status_dump_restore_add_node(ngx_event_t *ev,
         node->key = hash;
 
         *vtsn = *ovtsn;
+
+        /* invalidate pointers serialized from the old process */
+        vtsn->stat_status_code_counter = NULL;
+        vtsn->stat_status_code_length = 0;
 
         ngx_memcpy(vtsn->data, key->data, key->len);
 

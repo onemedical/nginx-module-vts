@@ -51,6 +51,7 @@ Table of Contents
 * [Customizing](#customizing)
   * [To customize after the module installed](#to-customize-after-the-module-installed)
   * [To customize before the module installed](#to-customize-before-the-module-installed)
+* [React Dashboard](#react-dashboard)
 * [Directives](#directives)
   * [vhost_traffic_status](#vhost_traffic_status)
   * [vhost_traffic_status_zone](#vhost_traffic_status_zone)
@@ -73,6 +74,7 @@ Table of Contents
   * [vhost_traffic_status_histogram_buckets](#vhost_traffic_status_histogram_buckets)
   * [vhost_traffic_status_bypass_limit](#vhost_traffic_status_bypass_limit)
   * [vhost_traffic_status_bypass_stats](#vhost_traffic_status_bypass_stats)
+  * [vhost_traffic_status_stats_by_upstream](#vhost_traffic_status_stats_by_upstream)
 * [Releases](#releases)
 * [See Also](#see-also)
 * [TODO](#todo)
@@ -93,6 +95,7 @@ the test requires Nginx to listen on port 80.
 
 ## Compatibility
 * Nginx
+  * 1.27.x (last tested: 1.27.3)
   * 1.22.x (last tested: 1.22.0)
   * 1.19.x (last tested: 1.19.6)
   * 1.18.x (last tested: 1.18.0)
@@ -129,6 +132,38 @@ Earlier versions is not tested.
 3. Build the nginx binary.
 
 4. Install the nginx binary.
+
+### Installtion with Profile-Guided Optimization
+
+It can be built with Profile-Guided Optimization (PGO) using gcc `fprofile` options. The detail of the PGO mechanisms has refer to the section 7.4 of [this paper](https://people.freebsd.org/~lstewart/articles/cpumemory.pdf).
+Here is an example of the process to make a PGO supported binary. Please use at your own risk.
+
+1. Compile with fprofile-generate.
+
+  ```
+  shell> pwd
+  /somewhere/nginx
+  shell> CC=gcc ./auto/configure --with-cc-opt='-fprofile-generate -fprofile-dir=./objs' --with-ld-opt='-lgcov' --add-module=/somewhere/nginx-module-vts
+  shell> make
+  ```
+
+2. Execute this module tests.
+
+  ```
+  shell> pwd
+  /somewhere/nginx-module-vts
+  shell> sudo PATH=/somewhere/nginx/objs:$PATH prove -r t/000.display_html.t
+  ...(during runtime it records coverage data into .gcda files)
+  ```
+
+3. Recompile with fprofile-use
+
+  ```
+  shell> pwd
+  /somewhere/nginx
+  shell> CC=gcc ./auto/configure --with-cc-opt='-fprofile-use -fprofile-dir=/somewhere/nginx-module-vts/objs' --with-ld-opt='-lgcov' --add-module=/somewhere/nginx-module-vts
+  shell> make
+  ```
 
 ## Synopsis
 
@@ -1194,6 +1229,56 @@ Please see the [vhost_traffic_status_dump](#vhost_traffic_status_dump) directive
 5. Install the nginx binary.
 
 
+## React Dashboard
+
+An alternative React-based dashboard is available under the `front/` directory. It fetches data from the existing `/status/format/json` API and renders the same tables as the built-in HTML page.
+
+### Prerequisites
+
+* Node.js >= 20.19 (or >= 22.12)
+* npm
+
+### Build
+
+```
+shell> make front-build
+```
+
+This produces static files in `front/dist/`.
+
+### Serve via nginx
+
+Add the following `location` block alongside the existing `/status` configuration:
+
+```Nginx
+location = /status/dashboard {
+    return 301 /status/dashboard/;
+}
+
+location /status/dashboard/ {
+    alias /path/to/nginx-module-vts/front/dist/;
+    index index.html;
+}
+```
+
+After reloading nginx, the React dashboard is available at `/status/dashboard`.
+
+### Development
+
+```
+shell> make front-dev
+```
+
+The Vite dev server proxies `/status/format/json` requests to `http://localhost:80` so the dashboard can be developed against a running nginx instance.
+
+### Clean
+
+```
+shell> make front-clean
+```
+
+Removes `front/dist/` and `front/node_modules/`.
+
 ## Directives
 
 ![draw_io_vts_diagram](https://user-images.githubusercontent.com/3648408/42613122-279cdb70-85da-11e8-940e-e348bd8ea861.png "The order of nginx-module-vts module directives")
@@ -1812,6 +1897,81 @@ http {
     }
 }
 ```
+
+### vhost_traffic_status_stats_by_upstream
+
+| -   | - |
+| --- | --- |
+| **Syntax**  | **vhost_traffic_status_stats_by_upstream** \<on\|off\> |
+| **Default** | on  |
+| **Context** | http|
+
+`Description:` Enables or disables to stats `upstreamZone`.
+The `upstreamZone` in the traffic status stats features is bypassed if this option is disabled.
+In other words, it is excluded from the traffic status stats.
+This is mostly useful if you want to be disable statistics collection for upstream servers to reduce CPU load.
+
+```Nginx
+http {
+    vhost_traffic_status_zone;
+    vhost_traffic_status_stats_by_upstream off;
+
+    proxy_cache_path /var/cache/nginx keys_zone=zone1:1m max_size=1g inactive=24h;
+    upstream backend {
+       ...
+    }
+    ...
+
+    server {
+
+        ...
+
+        location /status {
+            vhost_traffic_status_display;
+            vhost_traffic_status_display_format html;
+        }
+        location /backend {
+            proxy_cache zone1;
+            proxy_pass http://backend;
+        }
+    }
+}
+```
+
+### vhost_traffic_status_measure_status_codes
+
+Allows tracking of specific HTTP status codes or all status codes in the Vhost Traffic Status module.
+
+
+| -   | - |
+| --- | --- |
+| **Syntax**  | vhost_traffic_status_measure_status_codes [all] [status_code1] [status_code2] ... |
+| **Default** | off |
+| **Context** | http |
+
+
+
+#### Parameters
+- `status_code1, status_code2, ...`: Specific HTTP status codes to track (100-599)
+- `all`: Track all HTTP status codes
+
+#### Examples
+
+Track specific status codes:
+```nginx
+vhost_traffic_status_measure_status_codes 200 404 500;
+```
+
+Track all status codes:
+```nginx
+vhost_traffic_status_measure_status_codes all;
+```
+
+#### Description
+- By default, no specific status code tracking is enabled
+- Status codes must be in ascending order
+- Only valid HTTP status codes between 100 and 599 are accepted
+- When using `all`, every status code will be tracked
 
 ## Releases
 

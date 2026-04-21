@@ -21,6 +21,8 @@ static void ngx_http_vhost_traffic_status_rbtree_insert_value(
     ngx_rbtree_node_t *sentinel);
 static ngx_int_t ngx_http_vhost_traffic_status_init_zone(
     ngx_shm_zone_t *shm_zone, void *data);
+static char *ngx_http_vhost_traffic_status_measure_status_codes(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
 static char *ngx_http_vhost_traffic_status_zone(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static char *ngx_http_vhost_traffic_status_dump(ngx_conf_t *cf,
@@ -59,6 +61,15 @@ static ngx_conf_enum_t  ngx_http_vhost_traffic_status_average_method_post[] = {
     { ngx_null_string, 0 }
 };
 
+static ngx_conf_bitmask_t ngx_http_vhost_traffic_status_ignore_status_masks[] = {
+    { ngx_string("1xx"), NGX_HTTP_VHOST_TRAFFIC_STATUS_IGNORE_STATUS_1XX },
+    { ngx_string("2xx"), NGX_HTTP_VHOST_TRAFFIC_STATUS_IGNORE_STATUS_2XX },
+    { ngx_string("3xx"), NGX_HTTP_VHOST_TRAFFIC_STATUS_IGNORE_STATUS_3XX },
+    { ngx_string("4xx"), NGX_HTTP_VHOST_TRAFFIC_STATUS_IGNORE_STATUS_4XX },
+    { ngx_string("5xx"), NGX_HTTP_VHOST_TRAFFIC_STATUS_IGNORE_STATUS_5XX },
+    { ngx_string("off"), NGX_HTTP_VHOST_TRAFFIC_STATUS_IGNORE_STATUS_OFF },
+    { ngx_null_string, 0 }
+};
 
 static ngx_command_t ngx_http_vhost_traffic_status_commands[] = {
 
@@ -139,6 +150,13 @@ static ngx_command_t ngx_http_vhost_traffic_status_commands[] = {
       0,
       NULL },
 
+    { ngx_string("vhost_traffic_status_measure_status_codes"),
+        NGX_HTTP_MAIN_CONF|NGX_CONF_NOARGS|NGX_CONF_1MORE,
+        ngx_http_vhost_traffic_status_measure_status_codes,
+        0,
+        0,
+        NULL },
+
     { ngx_string("vhost_traffic_status_dump"),
       NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE12,
       ngx_http_vhost_traffic_status_dump,
@@ -210,6 +228,20 @@ static ngx_command_t ngx_http_vhost_traffic_status_commands[] = {
       offsetof(ngx_http_vhost_traffic_status_loc_conf_t, bypass_stats),
       NULL },
 
+    { ngx_string("vhost_traffic_status_stats_by_upstream"),
+      NGX_HTTP_MAIN_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_vhost_traffic_status_loc_conf_t, stats_by_upstream),
+      NULL },
+
+    { ngx_string("vhost_traffic_status_ignore_status"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
+      ngx_conf_set_bitmask_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_vhost_traffic_status_loc_conf_t, ignore_status),
+      &ngx_http_vhost_traffic_status_ignore_status_masks },
+
     ngx_null_command
 };
 
@@ -271,10 +303,12 @@ ngx_http_vhost_traffic_status_handler(ngx_http_request_t *r)
                       "handler::shm_add_server() failed");
     }
 
-    rc = ngx_http_vhost_traffic_status_shm_add_upstream(r);
-    if (rc != NGX_OK) {
-        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-                      "handler::shm_add_upstream() failed");
+    if (vtscf->stats_by_upstream) {
+        rc = ngx_http_vhost_traffic_status_shm_add_upstream(r);
+        if (rc != NGX_OK) {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                          "handler::shm_add_upstream() failed");
+        }
     }
 
     rc = ngx_http_vhost_traffic_status_shm_add_filter(r);
@@ -314,13 +348,19 @@ ngx_http_vhost_traffic_status_current_msec(void)
 ngx_msec_int_t
 ngx_http_vhost_traffic_status_request_time(ngx_http_request_t *r)
 {
-    ngx_time_t      *tp;
     ngx_msec_int_t   ms;
+
+#if (defined freenginx && nginx_version >= 1029000)
+    ms = (ngx_msec_int_t)
+             (ngx_current_msec - r->start_time);
+#else
+    ngx_time_t      *tp;
 
     tp = ngx_timeofday();
 
     ms = (ngx_msec_int_t)
              ((tp->sec - r->start_sec) * 1000 + (tp->msec - r->start_msec));
+#endif
     return ngx_max(ms, 0);
 }
 
@@ -447,6 +487,69 @@ ngx_http_vhost_traffic_status_init_zone(ngx_shm_zone_t *shm_zone, void *data)
                 &shm_zone->shm.name);
 
     return NGX_OK;
+}
+
+
+static char *
+ngx_http_vhost_traffic_status_measure_status_codes(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_http_vhost_traffic_status_ctx_t  *ctx;
+    ngx_str_t                            *value;
+    ngx_int_t                            n;
+    ngx_int_t                            previous_n;
+    ngx_uint_t                           i;
+    ngx_int_t                            *status_code;
+
+    ctx = ngx_http_conf_get_module_main_conf(cf, ngx_http_vhost_traffic_status_module);
+    if (ctx == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    ctx->measure_status_codes = ngx_array_create(cf->pool, 1, sizeof(ngx_int_t));
+    previous_n = 0;
+    value = cf->args->elts;
+
+    /* arguments process */
+    if (ngx_strncmp(value[1].data, "all", 3) == 0) {
+        for (n = 100; n < 600; n++) {
+            status_code = ngx_array_push(ctx->measure_status_codes);
+            if (status_code == NULL) {
+                return NGX_CONF_ERROR;
+            }
+            *status_code = n;
+        }
+        ctx->measure_all_status_codes = 1;
+        return NGX_OK;
+    }
+    for (i = 1; i < cf->args->nelts; i++) {
+        n = ngx_atoi(value[i].data, value[i].len);
+        if (n == NGX_ERROR || n == 0) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "invalid parameter \"%V\"", &value[i]);
+            return NGX_CONF_ERROR;
+        }
+
+        if (n < previous_n) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "status codes must be ordered");
+            return NGX_CONF_ERROR;
+        }
+
+        if (n < 100 || n > 599) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "invalid status_code \"%V\"", &value[i]);
+            return NGX_CONF_ERROR;
+        }
+
+        status_code = ngx_array_push(ctx->measure_status_codes);        
+        if (status_code == NULL) {
+            return NGX_CONF_ERROR;
+        }
+
+        *status_code = n;
+        previous_n = n;
+    }
+
+    ctx->measure_all_status_codes = 0;
+
+    return NGX_CONF_OK;
 }
 
 
@@ -889,6 +992,7 @@ ngx_http_vhost_traffic_status_create_loc_conf(ngx_conf_t *cf)
      *     conf->histogram_buckets = { NULL, ... };
      *     conf->bypass_limit = 0;
      *     conf->bypass_stats = 0;
+     *     conf->stats_by_upstream = 0;
      */
 
     conf->shm_zone = NGX_CONF_UNSET_PTR;
@@ -908,6 +1012,7 @@ ngx_http_vhost_traffic_status_create_loc_conf(ngx_conf_t *cf)
     conf->histogram_buckets = NGX_CONF_UNSET_PTR;
     conf->bypass_limit = NGX_CONF_UNSET;
     conf->bypass_stats = NGX_CONF_UNSET;
+    conf->stats_by_upstream = NGX_CONF_UNSET;
 
     conf->node_caches = ngx_pcalloc(cf->pool, sizeof(ngx_rbtree_node_t *)
                                     * (NGX_HTTP_VHOST_TRAFFIC_STATUS_UPSTREAM_FG + 1));
@@ -1018,6 +1123,10 @@ ngx_http_vhost_traffic_status_merge_loc_conf(ngx_conf_t *cf, void *parent, void 
 
     ngx_conf_merge_value(conf->bypass_limit, prev->bypass_limit, 0);
     ngx_conf_merge_value(conf->bypass_stats, prev->bypass_stats, 0);
+
+    ngx_conf_merge_value(conf->stats_by_upstream, prev->stats_by_upstream, 1);
+    ngx_conf_merge_bitmask_value(conf->ignore_status, prev->ignore_status,
+(NGX_CONF_BITMASK_SET|NGX_HTTP_VHOST_TRAFFIC_STATUS_IGNORE_STATUS_OFF));
 
     name = ctx->shm_name;
 

@@ -9,7 +9,7 @@ on:
 jobs:
   test:
     name: 'build'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: 'checkout'
         uses: actions/checkout@v3
@@ -20,6 +20,11 @@ jobs:
         with:
           repository: nginx/nginx
           path: nginx
+      - name: 'checkout freenginx'
+        uses: actions/checkout@v3
+        with:
+          repository: freenginx/nginx
+          path: freenginx
       - name: 'checkout luajit2'
         uses: actions/checkout@v3
         with:
@@ -71,10 +76,20 @@ jobs:
       - name: 'build nginx'
         working-directory: nginx
         run: |
-          ./auto/configure --with-ld-opt="-Wl,-rpath,/usr/local/lib" --without-pcre2 --add-module=/home/runner/work/nginx-module-vts/nginx-module-vts/ngx_devel_kit --add-module=/home/runner/work/nginx-module-vts/nginx-module-vts/lua-nginx-module --add-module=/home/runner/work/nginx-module-vts/nginx-module-vts/nginx-module-vts --add-module=/home/runner/work/nginx-module-vts/nginx-module-vts/nginx_upstream_check
+          ./auto/configure --with-ld-opt="-Wl,-rpath,/usr/local/lib" --add-module=/home/runner/work/nginx-module-vts/nginx-module-vts/ngx_devel_kit --add-module=/home/runner/work/nginx-module-vts/nginx-module-vts/lua-nginx-module --add-module=/home/runner/work/nginx-module-vts/nginx-module-vts/nginx-module-vts --add-module=/home/runner/work/nginx-module-vts/nginx-module-vts/nginx_upstream_check --with-http_ssl_module
           make
           sudo make install
           /usr/local/nginx/sbin/nginx -V
+        env:
+          LUAJIT_LIB: /usr/local/lib
+          LUAJIT_INC: /usr/local/include/luajit-2.1
+      - name: 'build freenginx'
+        working-directory: freenginx
+        run: |
+          ./auto/configure --prefix=/usr/local/freenginx --with-ld-opt="-Wl,-rpath,/usr/local/lib" --add-module=/home/runner/work/nginx-module-vts/nginx-module-vts/ngx_devel_kit --add-module=/home/runner/work/nginx-module-vts/nginx-module-vts/lua-nginx-module --add-module=/home/runner/work/nginx-module-vts/nginx-module-vts/nginx-module-vts --with-http_ssl_module
+          make
+          sudo make install
+          /usr/local/freenginx/sbin/nginx -V
         env:
           LUAJIT_LIB: /usr/local/lib
           LUAJIT_INC: /usr/local/include/luajit-2.1
@@ -98,3 +113,8 @@ jobs:
         run: |
           echo "/usr/local/nginx/sbin/" >> $GITHUB_PATH
           sudo TEST_UPSTREAM_CHECK=1 TEST_NGINX_SLEEP=1 PATH=/usr/local/nginx/sbin:$PATH prove t/024.upstream_check.t
+      - name: 'test freenginx'
+        working-directory: nginx-module-vts
+        run: |
+          echo "/usr/local/freenginx/sbin/" >> $GITHUB_PATH
+          sudo PATH=/usr/local/freenginx/sbin:$PATH prove -r t
